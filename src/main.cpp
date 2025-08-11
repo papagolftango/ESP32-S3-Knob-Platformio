@@ -6,27 +6,23 @@
 #include <Preferences.h>
 #include <ESP32Encoder.h>
 #include <lvgl.h>
+#include "lcd_config.h"
 
 // ================================
 // HARDWARE DEFINITIONS
 // ================================
 
-// Display pins (adjust for your hardware)
-#define TFT_CS     10
-#define TFT_DC     11
-#define TFT_RST    12
-#define TFT_MOSI   13
-#define TFT_CLK    14
-#define TFT_BL     15
+// Use constants from lcd_config.h for proper hardware configuration
+// These match Volos's working ESP32-S3 Knob setup
 
-// Rotary encoder pins
-#define ENCODER_A  8
-#define ENCODER_B  9
-#define ENCODER_BTN 7
+// Display dimensions (correct resolution for this hardware)
+#define SCREEN_WIDTH  EXAMPLE_LCD_H_RES
+#define SCREEN_HEIGHT EXAMPLE_LCD_V_RES
 
-// Display dimensions
-#define SCREEN_WIDTH  240
-#define SCREEN_HEIGHT 240
+// Encoder pins (based on Volos's working configuration - NO BUTTON)
+#define ENCODER_A  EXAMPLE_ENCODER_ECA_PIN
+#define ENCODER_B  EXAMPLE_ENCODER_ECB_PIN
+// Note: No encoder button in Volos's configuration
 
 // ================================
 // LVGL CONFIGURATION
@@ -149,7 +145,7 @@ void onMqttMessage(char* topic, byte* payload, unsigned int length) {
         JsonDocument doc;
         deserializeJson(doc, message);
         
-        if (doc.containsKey("power")) {
+        if (doc["power"].is<float>()) {
             float power = doc["power"];
             Serial.printf("Power: %.2f W\n", power);
         }
@@ -159,7 +155,7 @@ void onMqttMessage(char* topic, byte* payload, unsigned int length) {
         JsonDocument doc;
         deserializeJson(doc, message);
         
-        if (doc.containsKey("temperature")) {
+        if (doc["temperature"].is<float>()) {
             float temp = doc["temperature"];
             Serial.printf("Temperature: %.1f°C\n", temp);
         }
@@ -207,7 +203,7 @@ void createHomeScreen() {
     lv_obj_t* title = lv_label_create(screens[SCREEN_HOME]);
     lv_label_set_text(title, "🏠 HOME KNOB");
     lv_obj_set_style_text_color(title, lv_color_hex(0x87CEEB), 0);
-    lv_obj_set_style_text_font(title, &lv_font_montserrat_18, 0);
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_14, 0);
     lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 20);
     
     // Status indicators
@@ -236,13 +232,13 @@ void createEnergyScreen() {
     lv_obj_t* title = lv_label_create(screens[SCREEN_ENERGY]);
     lv_label_set_text(title, "⚡ ENERGY");
     lv_obj_set_style_text_color(title, lv_color_hex(0xFFD700), 0);
-    lv_obj_set_style_text_font(title, &lv_font_montserrat_18, 0);
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_14, 0);
     lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 20);
     
     lv_obj_t* power_label = lv_label_create(screens[SCREEN_ENERGY]);
     lv_label_set_text(power_label, "Power: 2.5 kW");
     lv_obj_set_style_text_color(power_label, lv_color_hex(0xFF6B35), 0);
-    lv_obj_set_style_text_font(power_label, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_font(power_label, &lv_font_montserrat_14, 0);
     lv_obj_align(power_label, LV_ALIGN_CENTER, 0, -20);
     
     lv_obj_t* usage_label = lv_label_create(screens[SCREEN_ENERGY]);
@@ -263,13 +259,13 @@ void createWeatherScreen() {
     lv_obj_t* title = lv_label_create(screens[SCREEN_WEATHER]);
     lv_label_set_text(title, "🌤️ WEATHER");
     lv_obj_set_style_text_color(title, lv_color_hex(0x87CEEB), 0);
-    lv_obj_set_style_text_font(title, &lv_font_montserrat_18, 0);
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_14, 0);
     lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 20);
     
     lv_obj_t* temp_label = lv_label_create(screens[SCREEN_WEATHER]);
     lv_label_set_text(temp_label, "🌡️ 22.3°C");
     lv_obj_set_style_text_color(temp_label, lv_color_hex(0xFF6B35), 0);
-    lv_obj_set_style_text_font(temp_label, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_font(temp_label, &lv_font_montserrat_14, 0);
     lv_obj_align(temp_label, LV_ALIGN_CENTER, 0, -20);
     
     lv_obj_t* humidity_label = lv_label_create(screens[SCREEN_WEATHER]);
@@ -290,7 +286,7 @@ void createHouseScreen() {
     lv_obj_t* title = lv_label_create(screens[SCREEN_HOUSE]);
     lv_label_set_text(title, "🏠 HOUSE");
     lv_obj_set_style_text_color(title, lv_color_hex(0xDDA0DD), 0);
-    lv_obj_set_style_text_font(title, &lv_font_montserrat_18, 0);
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_14, 0);
     lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 20);
     
     lv_obj_t* lights_label = lv_label_create(screens[SCREEN_HOUSE]);
@@ -316,13 +312,13 @@ void createClockScreen() {
     lv_obj_t* title = lv_label_create(screens[SCREEN_CLOCK]);
     lv_label_set_text(title, "🕐 CLOCK");
     lv_obj_set_style_text_color(title, lv_color_hex(0xFFFFFF), 0);
-    lv_obj_set_style_text_font(title, &lv_font_montserrat_18, 0);
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_14, 0);
     lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 20);
     
     lv_obj_t* time_label = lv_label_create(screens[SCREEN_CLOCK]);
     lv_label_set_text(time_label, "14:35:22");
     lv_obj_set_style_text_color(time_label, lv_color_hex(0x00FF00), 0);
-    lv_obj_set_style_text_font(time_label, &lv_font_montserrat_20, 0);
+    lv_obj_set_style_text_font(time_label, &lv_font_montserrat_14, 0);
     lv_obj_align(time_label, LV_ALIGN_CENTER, 0, -10);
     
     lv_obj_t* date_label = lv_label_create(screens[SCREEN_CLOCK]);
@@ -338,7 +334,7 @@ void createSettingsScreen() {
     lv_obj_t* title = lv_label_create(screens[SCREEN_SETTINGS]);
     lv_label_set_text(title, "⚙️ SETTINGS");
     lv_obj_set_style_text_color(title, lv_color_hex(0x90EE90), 0);
-    lv_obj_set_style_text_font(title, &lv_font_montserrat_18, 0);
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_14, 0);
     lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 20);
     
     lv_obj_t* wifi_btn = lv_label_create(screens[SCREEN_SETTINGS]);
@@ -394,30 +390,8 @@ void handleEncoder() {
 }
 
 void handleButton() {
-    if (digitalRead(ENCODER_BTN) == LOW) {
-        unsigned long currentTime = millis();
-        if (currentTime - lastButtonPress > DEBOUNCE_DELAY) {
-            lastButtonPress = currentTime;
-            
-            Serial.printf("Button pressed on screen: %d\n", currentScreen);
-            
-            // Handle button press based on current screen
-            switch (currentScreen) {
-                case SCREEN_SETTINGS:
-                    // Handle settings menu interactions
-                    Serial.println("Settings button action");
-                    break;
-                case SCREEN_HOME:
-                    // Quick action from home screen
-                    Serial.println("Home button action");
-                    break;
-                default:
-                    // Return to home screen
-                    switchToScreen(SCREEN_HOME);
-                    break;
-            }
-        }
-    }
+    // Button functionality removed - Volos's hardware has no encoder button
+    // Navigation is purely through encoder rotation
 }
 
 // ================================
@@ -431,14 +405,14 @@ void setup() {
     // Initialize preferences
     preferences.begin("config", false);
     
-    // Setup rotary encoder
-    ESP32Encoder::useInternalWeakPullResistors = puType::up;
+    // Setup rotary encoder (Volos configuration - no button)
+    ESP32Encoder::useInternalWeakPullResistors = UP;
     encoder.attachHalfQuad(ENCODER_A, ENCODER_B);
     encoder.setCount(0);
     
-    pinMode(ENCODER_BTN, INPUT_PULLUP);
+    // No button in Volos's configuration
     
-    Serial.println("Rotary encoder initialized");
+    Serial.println("Rotary encoder initialized (no button)");
     
     // Initialize LVGL
     lv_init();
