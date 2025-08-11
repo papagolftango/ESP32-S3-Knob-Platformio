@@ -5,6 +5,9 @@
 #include "bidi_switch_knob.h"
 #include "wifi_manager.h"
 #include "mqtt_manager.h"
+#include "display_driver.h"
+#include "command_handler.h"
+#include "encoder_manager.h"
 
 // ================================
 // HARDWARE DEFINITIONS
@@ -13,82 +16,32 @@
 // Use constants from lcd_config.h for proper hardware configuration
 // These match Volos's working ESP32-S3 Knob setup
 
-// Display dimensions (correct resolution for this hardware)
-#define SCREEN_WIDTH  EXAMPLE_LCD_H_RES
-#define SCREEN_HEIGHT EXAMPLE_LCD_V_RES
-
 // Encoder pins: GPIO 8 (A) and GPIO 7 (B) - Volos's working configuration (no button)
 
 // ================================
-// LVGL CONFIGURATION
+// GLOBAL INSTANCES
 // ================================
-
-static lv_disp_draw_buf_t draw_buf;
-static lv_color_t buf1[SCREEN_WIDTH * 10];
-static lv_color_t buf2[SCREEN_WIDTH * 10];
 
 // Global preferences instance
 Preferences preferences;
 
 // ================================
-// ROTARY ENCODER
-// ================================
-
-// ================================
-// ENCODER STATE (Volos's proven implementation)
-// ================================
-
-// Volos-style bit manipulation macros
-#define SET_BIT(reg,bit) (reg |= ((uint32_t)0x01<<bit))
-#define CLEAR_BIT(reg,bit) (reg &= (~((uint32_t)0x01<<bit)))
-#define READ_BIT(reg,bit) (((uint32_t)reg>>bit) & 0x01)
-#define BIT_EVEN_ALL (0x00ffffff)
-
-EventGroupHandle_t knob_even_ = NULL;
-static knob_handle_t s_knob = 0;
-SemaphoreHandle_t mutex;
-
-int lastEncoderValue = 0;
-
-// ================================
 // SCREEN MANAGEMENT
 // ================================
 
-enum ScreenType {
-    SCREEN_HOME,
-    SCREEN_ENERGY,
-    SCREEN_WEATHER,
-    SCREEN_HOUSE,
-    SCREEN_CLOCK,
-    SCREEN_SETTINGS,
-    SCREEN_COUNT
-};
-
+// Screen state variables
 ScreenType currentScreen = SCREEN_HOME;
+SettingsOption currentSettingsOption = SETTINGS_WIFI_RESET;
 lv_obj_t* screens[SCREEN_COUNT];
 lv_obj_t* currentScreenObj = nullptr;
-
-// ================================
-// DISPLAY DRIVER
-// ================================
-
-void my_disp_flush(lv_disp_drv_t *disp, const lv_area_t *area, lv_color_t *color_p) {
-    // This is a placeholder - you'll need to implement based on your display driver
-    // For now, just mark as ready
-    lv_disp_flush_ready(disp);
-}
-
-void my_touchpad_read(lv_indev_drv_t *indev_driver, lv_indev_data_t *data) {
-    // Placeholder for touch input - we'll use rotary encoder instead
-    data->state = LV_INDEV_STATE_REL;
-}
+lv_obj_t* settingsLabels[SETTINGS_COUNT];  // For highlighting selected option
+bool inSettingsMenu = false;
+unsigned long settingsSelectTime = 0;
 
 // Function declarations
 void setupWiFiAndMQTT();
-void onMQTTMessage(char* topic, uint8_t* payload, unsigned int length);
-void onMQTTConnect();
-void onMQTTDisconnect();
 void onWiFiConfigSaved();
+void switchToScreen(ScreenType screen);
 
 // ================================
 // WIFI AND MQTT SETUP
@@ -98,26 +51,12 @@ void setupWiFiAndMQTT() {
     // Setup WiFi with custom styling
     wifiManager.setCustomHeadElement("<style>body{background:#1e1e1e;color:#fff;font-family:Arial,sans-serif;}.c{text-align:center;}div,input{padding:5px;font-size:1em;margin:5px 0;box-sizing:border-box;background:#333;border:1px solid #555;color:#fff;}input[type='submit']{background:#0066cc;cursor:pointer;}input[type='submit']:hover{background:#0052a3;}</style>");
     
-    // Get MQTT config for WiFi Manager parameters
-    MQTTConfig mqttConfig = mqttManager.getConfig();
-    
-    // Create WiFi Manager parameters for MQTT configuration
-    WiFiManagerParameter custom_mqtt_server("mqtt_server", "MQTT Server", mqttConfig.server, 64);
-    WiFiManagerParameter custom_mqtt_port("mqtt_port", "MQTT Port", String(mqttConfig.port).c_str(), 6);
-    WiFiManagerParameter custom_mqtt_username("mqtt_username", "MQTT Username", mqttConfig.username, 32);
-    WiFiManagerParameter custom_mqtt_password("mqtt_password", "MQTT Password", mqttConfig.password, 32);
-    WiFiManagerParameter custom_mqtt_client_id("mqtt_client_id", "MQTT Client ID", mqttConfig.clientId, 32);
-    
-    // Add MQTT parameters to WiFi Manager
-    wifiManager.addParameter(&custom_mqtt_server);
-    wifiManager.addParameter(&custom_mqtt_port);
-    wifiManager.addParameter(&custom_mqtt_username);
-    wifiManager.addParameter(&custom_mqtt_password);
-    wifiManager.addParameter(&custom_mqtt_client_id);
-    
     // Set WiFi Manager callbacks
     wifiManager.setSaveConfigCallback(onWiFiConfigSaved);
     wifiManager.setConfigPortalTimeout(300); // 5 minutes
+    
+    // Setup MQTT Manager with WiFiManager integration
+    mqttManager.setupWiFiManagerParameters(wifiManager);
     
     // Start WiFi connection
     Serial.println("Starting WiFi connection...");
@@ -128,36 +67,25 @@ void setupWiFiAndMQTT() {
         Serial.printf("IP address: %s\n", wifiManager.getIP().c_str());
         Serial.printf("SSID: %s\n", wifiManager.getSSID().c_str());
         
-        // Update MQTT config from WiFi Manager parameters
-        MQTTConfig updatedConfig = mqttConfig;
-        if (strlen(custom_mqtt_server.getValue()) > 0) {
-            strncpy(updatedConfig.server, custom_mqtt_server.getValue(), sizeof(updatedConfig.server));
-        }
-        if (strlen(custom_mqtt_port.getValue()) > 0) {
-            updatedConfig.port = atoi(custom_mqtt_port.getValue());
-        }
-        if (strlen(custom_mqtt_username.getValue()) > 0) {
-            strncpy(updatedConfig.username, custom_mqtt_username.getValue(), sizeof(updatedConfig.username));
-        }
-        if (strlen(custom_mqtt_password.getValue()) > 0) {
-            strncpy(updatedConfig.password, custom_mqtt_password.getValue(), sizeof(updatedConfig.password));
-        }
-        if (strlen(custom_mqtt_client_id.getValue()) > 0) {
-            strncpy(updatedConfig.clientId, custom_mqtt_client_id.getValue(), sizeof(updatedConfig.clientId));
-        }
+        // Update MQTT config and setup MQTT
+        mqttManager.updateConfigFromWiFiManager(wifiManager);
         
-        // Set updated MQTT config and save
-        mqttManager.setConfig(updatedConfig);
-        mqttManager.saveConfig();
+        // Optional: Set custom data type callbacks for specialized handling
+        mqttManager.setEnergyCallback([](const JsonDocument& data, const String& topic) {
+            float power = mqttManager.extractFloatFromJson(data, "power", 0.0);
+            float energy = mqttManager.extractFloatFromJson(data, "energy", 0.0);
+            Serial.printf("⚡ Energy Update - Power: %.2f W, Total: %.2f kWh\n", power, energy);
+            // Here you could update display elements, trigger actions, etc.
+        });
         
-        // Setup MQTT
-        mqttManager.setMessageCallback(onMQTTMessage);
-        mqttManager.setConnectCallback(onMQTTConnect);
-        mqttManager.setDisconnectCallback(onMQTTDisconnect);
+        mqttManager.setWeatherCallback([](const JsonDocument& data, const String& topic) {
+            float temp = mqttManager.extractFloatFromJson(data, "temperature", 0.0);
+            int humidity = mqttManager.extractIntFromJson(data, "humidity", 0);
+            Serial.printf("🌡️ Weather Update - %.1f°C, %d%% humidity\n", temp, humidity);
+            // Here you could update weather display, adjust heating, etc.
+        });
         
-        if (mqttManager.begin()) {
-            mqttManager.connect();
-        }
+        mqttManager.setupWithWiFiManager(wifiManager);
         
     } else {
         Serial.println("WiFi connection failed - check configuration portal");
@@ -168,85 +96,7 @@ void setupWiFiAndMQTT() {
 
 void onWiFiConfigSaved() {
     Serial.println("WiFi and MQTT configuration saved!");
-}
-
-void onMQTTConnect() {
-    Serial.println("MQTT connected - subscribing to topics");
-    
-    // Subscribe to device-specific topics
-    String deviceTopic = mqttManager.getDeviceTopic("command");
-    mqttManager.subscribe(deviceTopic.c_str());
-    
-    // Subscribe to general topics
-    mqttManager.subscribe("energy/+");
-    mqttManager.subscribe("weather/+");
-    mqttManager.subscribe("house/+");
-    
-    // Publish online status
-    String statusTopic = mqttManager.getDeviceTopic("status");
-    mqttManager.publish(statusTopic.c_str(), "online", true);
-}
-
-void onMQTTDisconnect() {
-    Serial.println("MQTT disconnected");
-}
-
-void onMQTTMessage(char* topic, uint8_t* payload, unsigned int length) {
-    // Convert payload to string
-    char message[length + 1];
-    memcpy(message, payload, length);
-    message[length] = '\0';
-    
-    Serial.printf("MQTT Message [%s]: %s\n", topic, message);
-    
-    // Parse JSON if applicable
-    JsonDocument doc;
-    if (mqttManager.parseJsonMessage(message, length, doc)) {
-        // Handle different topic types
-        if (strstr(topic, "/energy/")) {
-            // Handle energy data
-            float power = mqttManager.extractFloatFromJson(doc, "power", 0.0);
-            float energy = mqttManager.extractFloatFromJson(doc, "energy", 0.0);
-            Serial.printf("Energy data - Power: %.2f W, Energy: %.2f kWh\n", power, energy);
-            
-        } else if (strstr(topic, "/weather/")) {
-            // Handle weather data
-            float temp = mqttManager.extractFloatFromJson(doc, "temperature", 0.0);
-            int humidity = mqttManager.extractIntFromJson(doc, "humidity", 0);
-            Serial.printf("Weather data - Temp: %.1f°C, Humidity: %d%%\n", temp, humidity);
-            
-        } else if (strstr(topic, "/house/")) {
-            // Handle house automation data
-            String room = mqttManager.extractStringFromJson(doc, "room", "unknown");
-            String device = mqttManager.extractStringFromJson(doc, "device", "unknown");
-            String state = mqttManager.extractStringFromJson(doc, "state", "unknown");
-            Serial.printf("House data - Room: %s, Device: %s, State: %s\n", 
-                         room.c_str(), device.c_str(), state.c_str());
-            
-        } else if (strstr(topic, "/command")) {
-            // Handle device commands
-            String command = mqttManager.extractStringFromJson(doc, "command", "");
-            if (command == "reset_wifi") {
-                wifiManager.reset();
-                ESP.restart();
-            } else if (command == "restart") {
-                ESP.restart();
-            } else if (command == "status") {
-                // Publish status
-                JsonDocument statusDoc;
-                statusDoc["uptime"] = millis();
-                statusDoc["free_heap"] = ESP.getFreeHeap();
-                statusDoc["wifi_rssi"] = wifiManager.getRSSI();
-                statusDoc["mqtt_connected"] = mqttManager.connected();
-                
-                String statusTopic = mqttManager.getDeviceTopic("status");
-                mqttManager.publishJson(statusTopic.c_str(), statusDoc);
-            }
-        }
-    } else {
-        // Handle non-JSON messages
-        Serial.printf("Non-JSON message: %s\n", message);
-    }
+    mqttManager.updateConfigFromWiFiManager(wifiManager);
 }
 
 // ================================
@@ -395,20 +245,125 @@ void createSettingsScreen() {
     lv_obj_set_style_text_font(title, &lv_font_montserrat_14, 0);
     lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 20);
     
-    lv_obj_t* wifi_btn = lv_label_create(screens[SCREEN_SETTINGS]);
-    lv_label_set_text(wifi_btn, "📶 WiFi Reset");
-    lv_obj_set_style_text_color(wifi_btn, lv_color_hex(0x87CEEB), 0);
-    lv_obj_align(wifi_btn, LV_ALIGN_CENTER, 0, -30);
+    // WiFi Reset option
+    settingsLabels[SETTINGS_WIFI_RESET] = lv_label_create(screens[SCREEN_SETTINGS]);
+    lv_label_set_text(settingsLabels[SETTINGS_WIFI_RESET], "📶 WiFi Reset");
+    lv_obj_set_style_text_color(settingsLabels[SETTINGS_WIFI_RESET], lv_color_hex(0x87CEEB), 0);
+    lv_obj_align(settingsLabels[SETTINGS_WIFI_RESET], LV_ALIGN_CENTER, 0, -50);
     
-    lv_obj_t* mqtt_btn = lv_label_create(screens[SCREEN_SETTINGS]);
-    lv_label_set_text(mqtt_btn, "📡 MQTT Config");
-    lv_obj_set_style_text_color(mqtt_btn, lv_color_hex(0xFFD700), 0);
-    lv_obj_align(mqtt_btn, LV_ALIGN_CENTER, 0, 0);
+    // MQTT Reset option
+    settingsLabels[SETTINGS_MQTT_RESET] = lv_label_create(screens[SCREEN_SETTINGS]);
+    lv_label_set_text(settingsLabels[SETTINGS_MQTT_RESET], "📡 MQTT Reset");
+    lv_obj_set_style_text_color(settingsLabels[SETTINGS_MQTT_RESET], lv_color_hex(0xFFD700), 0);
+    lv_obj_align(settingsLabels[SETTINGS_MQTT_RESET], LV_ALIGN_CENTER, 0, -25);
     
-    lv_obj_t* factory_btn = lv_label_create(screens[SCREEN_SETTINGS]);
-    lv_label_set_text(factory_btn, "🔄 Factory Reset");
-    lv_obj_set_style_text_color(factory_btn, lv_color_hex(0xFF4444), 0);
-    lv_obj_align(factory_btn, LV_ALIGN_CENTER, 0, 30);
+    // Factory Reset option
+    settingsLabels[SETTINGS_FACTORY_RESET] = lv_label_create(screens[SCREEN_SETTINGS]);
+    lv_label_set_text(settingsLabels[SETTINGS_FACTORY_RESET], "🔄 Factory Reset");
+    lv_obj_set_style_text_color(settingsLabels[SETTINGS_FACTORY_RESET], lv_color_hex(0xFF4444), 0);
+    lv_obj_align(settingsLabels[SETTINGS_FACTORY_RESET], LV_ALIGN_CENTER, 0, 0);
+    
+    // Restart option
+    settingsLabels[SETTINGS_RESTART] = lv_label_create(screens[SCREEN_SETTINGS]);
+    lv_label_set_text(settingsLabels[SETTINGS_RESTART], "🔄 Restart");
+    lv_obj_set_style_text_color(settingsLabels[SETTINGS_RESTART], lv_color_hex(0xFFA500), 0);
+    lv_obj_align(settingsLabels[SETTINGS_RESTART], LV_ALIGN_CENTER, 0, 25);
+    
+    // Exit option
+    settingsLabels[SETTINGS_EXIT] = lv_label_create(screens[SCREEN_SETTINGS]);
+    lv_label_set_text(settingsLabels[SETTINGS_EXIT], "⬅️ Exit Settings");
+    lv_obj_set_style_text_color(settingsLabels[SETTINGS_EXIT], lv_color_hex(0xCCCCCC), 0);
+    lv_obj_align(settingsLabels[SETTINGS_EXIT], LV_ALIGN_CENTER, 0, 50);
+    
+    // Instructions
+    lv_obj_t* instructions = lv_label_create(screens[SCREEN_SETTINGS]);
+    lv_label_set_text(instructions, "Turn: Navigate • Hold 3s: Select");
+    lv_obj_set_style_text_color(instructions, lv_color_hex(0x666666), 0);
+    lv_obj_set_style_text_align(instructions, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_align(instructions, LV_ALIGN_BOTTOM_MID, 0, -10);
+}
+
+void updateSettingsHighlight() {
+    // Reset all colors to normal
+    lv_obj_set_style_text_color(settingsLabels[SETTINGS_WIFI_RESET], lv_color_hex(0x87CEEB), 0);
+    lv_obj_set_style_text_color(settingsLabels[SETTINGS_MQTT_RESET], lv_color_hex(0xFFD700), 0);
+    lv_obj_set_style_text_color(settingsLabels[SETTINGS_FACTORY_RESET], lv_color_hex(0xFF4444), 0);
+    lv_obj_set_style_text_color(settingsLabels[SETTINGS_RESTART], lv_color_hex(0xFFA500), 0);
+    lv_obj_set_style_text_color(settingsLabels[SETTINGS_EXIT], lv_color_hex(0xCCCCCC), 0);
+    
+    // Highlight current selection
+    lv_obj_set_style_text_color(settingsLabels[currentSettingsOption], lv_color_hex(0x00FF00), 0);
+    
+    // Update text to show selection state
+    const char* baseTexts[] = {
+        "📶 WiFi Reset",
+        "📡 MQTT Reset", 
+        "🔄 Factory Reset",
+        "🔄 Restart",
+        "⬅️ Exit Settings"
+    };
+    
+    for (int i = 0; i < SETTINGS_COUNT; i++) {
+        if (i == currentSettingsOption) {
+            String highlightedText = "> " + String(baseTexts[i]) + " <";
+            lv_label_set_text(settingsLabels[i], highlightedText.c_str());
+        } else {
+            lv_label_set_text(settingsLabels[i], baseTexts[i]);
+        }
+    }
+}
+
+void executeSettingsAction() {
+    Serial.printf("Executing settings action: %d\n", currentSettingsOption);
+    
+    switch (currentSettingsOption) {
+        case SETTINGS_WIFI_RESET:
+            Serial.println("WiFi Reset selected - Clearing WiFi configuration...");
+            lv_label_set_text(settingsLabels[SETTINGS_WIFI_RESET], "📶 Resetting WiFi...");
+            lv_task_handler();  // Update display
+            delay(1000);
+            wifiManager.reset();
+            ESP.restart();
+            break;
+            
+        case SETTINGS_MQTT_RESET:
+            Serial.println("MQTT Reset selected - Clearing MQTT configuration...");
+            lv_label_set_text(settingsLabels[SETTINGS_MQTT_RESET], "📡 Resetting MQTT...");
+            lv_task_handler();  // Update display
+            delay(1000);
+            mqttManager.resetConfig();
+            mqttManager.saveConfig();
+            Serial.println("MQTT config cleared. Restarting...");
+            ESP.restart();
+            break;
+            
+        case SETTINGS_FACTORY_RESET:
+            Serial.println("Factory Reset selected - Clearing ALL configuration...");
+            lv_label_set_text(settingsLabels[SETTINGS_FACTORY_RESET], "🔄 Factory Reset...");
+            lv_task_handler();  // Update display
+            delay(1000);
+            wifiManager.reset();
+            mqttManager.resetConfig();
+            preferences.clear();
+            Serial.println("Factory reset complete. Restarting...");
+            ESP.restart();
+            break;
+            
+        case SETTINGS_RESTART:
+            Serial.println("Restart selected - Restarting device...");
+            lv_label_set_text(settingsLabels[SETTINGS_RESTART], "🔄 Restarting...");
+            lv_task_handler();  // Update display
+            delay(1000);
+            ESP.restart();
+            break;
+            
+        case SETTINGS_EXIT:
+            Serial.println("Exit selected - Returning to home screen");
+            inSettingsMenu = false;
+            EncoderManager::exitSettingsMenu();
+            switchToScreen(SCREEN_HOME);
+            break;
+    }
 }
 
 void switchToScreen(ScreenType screen) {
@@ -417,72 +372,40 @@ void switchToScreen(ScreenType screen) {
         lv_scr_load(screens[screen]);
         currentScreenObj = screens[screen];
         
+        // Update encoder manager state
+        EncoderManager::setCurrentScreen(screen);
+        
+        // Handle settings screen special behavior
+        if (screen == SCREEN_SETTINGS) {
+            inSettingsMenu = true;
+            currentSettingsOption = SETTINGS_WIFI_RESET;
+            updateSettingsHighlight();
+            EncoderManager::enterSettingsMenu();
+        } else {
+            inSettingsMenu = false;
+        }
+        
         const char* screenNames[] = {"HOME", "ENERGY", "WEATHER", "HOUSE", "CLOCK", "SETTINGS"};
         Serial.printf("Switched to %s screen\n", screenNames[screen]);
     }
 }
 
 // ================================
-// ROTARY ENCODER HANDLING
+// ENCODER CALLBACKS
 // ================================
 
-// ================================
-// ROTARY ENCODER HANDLING (Volos's Multi-core Architecture)
-// ================================
-
-// Volos-style encoder callbacks
-static void _knob_left_cb(void *arg, void *data)
-{
-    uint8_t eventBits_ = 0;
-    SET_BIT(eventBits_, 0);
-    xEventGroupSetBits(knob_even_, eventBits_);
+void onScreenChange(ScreenType newScreen) {
+    switchToScreen(newScreen);
 }
 
-static void _knob_right_cb(void *arg, void *data)
-{
-    uint8_t eventBits_ = 0;
-    SET_BIT(eventBits_, 1);
-    xEventGroupSetBits(knob_even_, eventBits_);
+void onSettingsNavigation(SettingsOption newOption) {
+    currentSettingsOption = newOption;
+    updateSettingsHighlight();
 }
 
-// Encoder task (runs on separate core)
-static void user_encoder_loop_task(void *arg)
-{
-    for(;;)
-    {
-        EventBits_t even = xEventGroupWaitBits(knob_even_, BIT_EVEN_ALL, pdTRUE, pdFALSE, pdMS_TO_TICKS(5000));
-        
-        if(READ_BIT(even, 0))  // Left rotation
-        { 
-            if (xSemaphoreTake(mutex, portMAX_DELAY)) { 
-                // Counter-clockwise rotation
-                currentScreen = (ScreenType)((currentScreen - 1 + SCREEN_COUNT) % SCREEN_COUNT);
-                switchToScreen(currentScreen);
-                Serial.printf("Encoder CCW -> Screen: %d\n", currentScreen);
-                xSemaphoreGive(mutex); 
-            }
-        }
-        
-        if(READ_BIT(even, 1))  // Right rotation
-        {
-            if (xSemaphoreTake(mutex, portMAX_DELAY)) { 
-                // Clockwise rotation
-                currentScreen = (ScreenType)((currentScreen + 1) % SCREEN_COUNT);
-                switchToScreen(currentScreen);
-                Serial.printf("Encoder CW -> Screen: %d\n", currentScreen);
-                xSemaphoreGive(mutex); 
-            }
-        }
-    }
-}
-
-void handleEncoder() {
-    // No longer needed - handled by the encoder task
-}
-
-void handleButton() {
-    // Button functionality removed - Volos's hardware has no encoder button
-    // Navigation is purely through encoder rotation
+void onSettingsExecute(SettingsOption option) {
+    currentSettingsOption = option;
+    executeSettingsAction();
 }
 
 // ================================
@@ -496,54 +419,37 @@ void setup() {
     // Initialize preferences
     preferences.begin("config", false);
     
-    // Initialize Volos's encoder system (exact implementation)
-    mutex = xSemaphoreCreateMutex();
-    knob_even_ = xEventGroupCreate();
-    
-    // Create knob with Volos's configuration
-    knob_config_t cfg = {
-        .gpio_encoder_a = EXAMPLE_ENCODER_ECA_PIN,
-        .gpio_encoder_b = EXAMPLE_ENCODER_ECB_PIN,
-    };
-    s_knob = iot_knob_create(&cfg);
-    
-    if (s_knob) {
-        // Register Volos-style callbacks
-        iot_knob_register_cb(s_knob, KNOB_LEFT, _knob_left_cb, NULL);
-        iot_knob_register_cb(s_knob, KNOB_RIGHT, _knob_right_cb, NULL);
-        
-        // Start encoder task on separate core
-        xTaskCreate(user_encoder_loop_task, "user_encoder_loop_task", 3000, NULL, 2, NULL);
-        
-        Serial.println("Volos encoder system initialized successfully");
-    } else {
-        Serial.println("Failed to initialize Volos encoder system");
+    // Initialize encoder system using EncoderManager
+    if (!EncoderManager::begin()) {
+        Serial.println("Failed to initialize encoder system");
+        return;
     }
     
-    Serial.println("Rotary encoder initialized (Volos multi-core, no button)");
+    // Set up encoder callbacks
+    EncoderManager::setScreenChangeCallback(onScreenChange);
+    EncoderManager::setSettingsNavigationCallback(onSettingsNavigation);
+    EncoderManager::setSettingsExecuteCallback(onSettingsExecute);
     
-    // Initialize LVGL
-    lv_init();
+    Serial.println("Encoder system initialized successfully");
     
-    // Initialize display driver
-    lv_disp_draw_buf_init(&draw_buf, buf1, buf2, SCREEN_WIDTH * 10);
+    // Initialize display system using DisplayDriver
+    if (!DisplayDriver::initLVGL()) {
+        Serial.println("Failed to initialize LVGL");
+        return;
+    }
     
-    static lv_disp_drv_t disp_drv;
-    lv_disp_drv_init(&disp_drv);
-    disp_drv.hor_res = SCREEN_WIDTH;
-    disp_drv.ver_res = SCREEN_HEIGHT;
-    disp_drv.flush_cb = my_disp_flush;
-    disp_drv.draw_buf = &draw_buf;
-    lv_disp_drv_register(&disp_drv);
+    if (!DisplayDriver::initDisplay()) {
+        Serial.println("Failed to initialize display driver");
+        return;
+    }
     
-    // Initialize input device
-    static lv_indev_drv_t indev_drv;
-    lv_indev_drv_init(&indev_drv);
-    indev_drv.type = LV_INDEV_TYPE_POINTER;
-    indev_drv.read_cb = my_touchpad_read;
-    lv_indev_drv_register(&indev_drv);
+    if (!DisplayDriver::initInput()) {
+        Serial.println("Failed to initialize input driver");
+        return;
+    }
     
-    Serial.println("LVGL initialized");
+    DisplayDriver::printDisplayInfo();
+    Serial.println("Display system initialized successfully");
     
     // Create all screens
     createHomeScreen();
@@ -555,11 +461,15 @@ void setup() {
     
     // Start with home screen
     switchToScreen(SCREEN_HOME);
+    EncoderManager::setCurrentScreen(SCREEN_HOME);
     
     Serial.println("Screens created");
     
     // Initialize WiFi and MQTT using new managers
     setupWiFiAndMQTT();
+    
+    // Initialize command handler for development/integration commands
+    CommandHandler::begin(true);  // Enable commands at startup
     
     Serial.println("Setup complete!");
 }
@@ -569,12 +479,11 @@ void setup() {
 // ================================
 
 void loop() {
-    // Handle LVGL tasks
-    lv_timer_handler();
+    // Handle LVGL tasks using DisplayDriver
+    DisplayDriver::handleLVGLTasks();
     
-    // Handle rotary encoder
-    handleEncoder();
-    handleButton();
+    // Handle serial commands using CommandHandler
+    CommandHandler::handleSerialInput();
     
     // Handle MQTT connection and messages
     mqttManager.loop();

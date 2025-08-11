@@ -69,10 +69,10 @@ bool MQTTManager::begin() {
     // Set server and port
     mqttClient.setServer(config.server, config.port);
     
-    // Set callback if provided
-    if (messageCallback) {
-        mqttClient.setCallback(messageCallback);
-    }
+    // Set our internal message handler
+    mqttClient.setCallback([this](char* topic, uint8_t* payload, unsigned int length) {
+        this->handleIncomingMessage(topic, payload, length);
+    });
     
     // Set keep alive
     mqttClient.setKeepAlive(config.keepAlive);
@@ -102,14 +102,13 @@ bool MQTTManager::connect() {
         isConnected = true;
         Serial.printf("MQTT connected as %s\n", config.clientId);
         
+        // Subscribe to default topics automatically
+        subscribeToDefaultTopics();
+        
         // Call connect callback if set
         if (connectCallback) {
             connectCallback();
         }
-        
-        // Subscribe to device topics
-        String deviceTopic = getDeviceTopic("+");
-        subscribe(deviceTopic.c_str());
         
     } else {
         isConnected = false;
@@ -332,4 +331,240 @@ float MQTTManager::extractFloatFromJson(const JsonDocument& doc, const char* key
         return doc[key].as<float>();
     }
     return defaultValue;
+}
+
+// ================================
+// WiFiManager Integration
+// ================================
+
+void MQTTManager::setupWiFiManagerParameters(WiFiManagerCustom& wifiManager) {
+    // Clean up any existing parameters
+    cleanupWiFiManagerParameters();
+    
+    // Create new parameters with current config values
+    mqtt_server_param = new WiFiManagerParameter("mqtt_server", "MQTT Server", config.server, 64);
+    mqtt_port_param = new WiFiManagerParameter("mqtt_port", "MQTT Port", String(config.port).c_str(), 6);
+    mqtt_username_param = new WiFiManagerParameter("mqtt_username", "MQTT Username", config.username, 32);
+    mqtt_password_param = new WiFiManagerParameter("mqtt_password", "MQTT Password", config.password, 32);
+    mqtt_client_id_param = new WiFiManagerParameter("mqtt_client_id", "MQTT Client ID", config.clientId, 32);
+    
+    // Add parameters to WiFiManager
+    wifiManager.addParameter(mqtt_server_param);
+    wifiManager.addParameter(mqtt_port_param);
+    wifiManager.addParameter(mqtt_username_param);
+    wifiManager.addParameter(mqtt_password_param);
+    wifiManager.addParameter(mqtt_client_id_param);
+}
+
+void MQTTManager::updateConfigFromWiFiManager(WiFiManagerCustom& wifiManager) {
+    if (!mqtt_server_param) return;
+    
+    // Update config from WiFiManager parameters
+    if (strlen(mqtt_server_param->getValue()) > 0) {
+        strncpy(config.server, mqtt_server_param->getValue(), sizeof(config.server));
+    }
+    if (strlen(mqtt_port_param->getValue()) > 0) {
+        config.port = atoi(mqtt_port_param->getValue());
+    }
+    if (strlen(mqtt_username_param->getValue()) > 0) {
+        strncpy(config.username, mqtt_username_param->getValue(), sizeof(config.username));
+    }
+    if (strlen(mqtt_password_param->getValue()) > 0) {
+        strncpy(config.password, mqtt_password_param->getValue(), sizeof(config.password));
+    }
+    if (strlen(mqtt_client_id_param->getValue()) > 0) {
+        strncpy(config.clientId, mqtt_client_id_param->getValue(), sizeof(config.clientId));
+    }
+    
+    // Save the updated config
+    saveConfig();
+    
+    Serial.println("MQTT config updated from WiFiManager");
+}
+
+void MQTTManager::cleanupWiFiManagerParameters() {
+    delete mqtt_server_param;
+    delete mqtt_port_param;
+    delete mqtt_username_param;
+    delete mqtt_password_param;
+    delete mqtt_client_id_param;
+    
+    mqtt_server_param = nullptr;
+    mqtt_port_param = nullptr;
+    mqtt_username_param = nullptr;
+    mqtt_password_param = nullptr;
+    mqtt_client_id_param = nullptr;
+}
+
+bool MQTTManager::setupWithWiFiManager(WiFiManagerCustom& wifiManager) {
+    // Setup WiFiManager parameters for MQTT
+    setupWiFiManagerParameters(wifiManager);
+    
+    // Initialize MQTT Manager
+    if (!begin()) {
+        Serial.println("MQTT manager failed to initialize");
+        return false;
+    }
+    
+    // Try to connect to MQTT
+    bool mqttConnected = connect();
+    if (mqttConnected) {
+        Serial.println("MQTT connected successfully!");
+    } else {
+        Serial.println("MQTT connection failed - will retry automatically");
+        Serial.println("Check MQTT server settings in configuration");
+    }
+    
+    return true; // Return true even if MQTT connection failed - it will retry
+}
+
+// ================================
+// Topic Management
+// ================================
+
+void MQTTManager::addSubscriptionTopic(const String& topic) {
+    subscriptionTopics.push_back(topic);
+}
+
+void MQTTManager::clearSubscriptionTopics() {
+    subscriptionTopics.clear();
+}
+
+void MQTTManager::subscribeToDefaultTopics() {
+    if (!connected()) return;
+    
+    // Subscribe to device-specific topics
+    String deviceTopic = getDeviceTopic("command");
+    subscribe(deviceTopic.c_str());
+    
+    // Subscribe to default topics
+    subscribe("energy/+");
+    subscribe("weather/+");
+    subscribe("house/+");
+    
+    // Subscribe to any additional topics
+    for (const String& topic : subscriptionTopics) {
+        subscribe(topic.c_str());
+    }
+    
+    // Publish online status
+    String statusTopic = getDeviceTopic("status");
+    publish(statusTopic.c_str(), "online", true);
+}
+
+// ================================
+// Message Handling
+// ================================
+
+void MQTTManager::handleIncomingMessage(char* topic, uint8_t* payload, unsigned int length) {
+    // Convert payload to string
+    char message[length + 1];
+    memcpy(message, payload, length);
+    message[length] = '\0';
+    
+    Serial.printf("MQTT Message [%s]: %s\n", topic, message);
+    
+    // Parse JSON if applicable
+    JsonDocument doc;
+    if (parseJsonMessage(message, length, doc)) {
+        // Handle different topic types
+        if (strstr(topic, "/energy/")) {
+            if (energyCallback) {
+                energyCallback(doc, String(topic));
+            } else {
+                // Default energy handling
+                float power = extractFloatFromJson(doc, "power", 0.0);
+                float energy = extractFloatFromJson(doc, "energy", 0.0);
+                Serial.printf("Energy data - Power: %.2f W, Energy: %.2f kWh\n", power, energy);
+            }
+            
+        } else if (strstr(topic, "/weather/")) {
+            if (weatherCallback) {
+                weatherCallback(doc, String(topic));
+            } else {
+                // Default weather handling
+                float temp = extractFloatFromJson(doc, "temperature", 0.0);
+                int humidity = extractIntFromJson(doc, "humidity", 0);
+                Serial.printf("Weather data - Temp: %.1f°C, Humidity: %d%%\n", temp, humidity);
+            }
+            
+        } else if (strstr(topic, "/house/")) {
+            if (houseCallback) {
+                houseCallback(doc, String(topic));
+            } else {
+                // Default house handling
+                String room = extractStringFromJson(doc, "room", "unknown");
+                String device = extractStringFromJson(doc, "device", "unknown");
+                String state = extractStringFromJson(doc, "state", "unknown");
+                Serial.printf("House data - Room: %s, Device: %s, State: %s\n", 
+                             room.c_str(), device.c_str(), state.c_str());
+            }
+            
+        } else if (strstr(topic, "/command")) {
+            // Handle device commands
+            String command = extractStringFromJson(doc, "command", "");
+            handleDeviceCommand(command, doc);
+        }
+    } else {
+        // Handle non-JSON messages
+        Serial.printf("Non-JSON message: %s\n", message);
+    }
+    
+    // Call the original message callback if set
+    if (messageCallback) {
+        messageCallback(topic, payload, length);
+    }
+}
+
+void MQTTManager::handleDeviceCommand(const String& command, const JsonDocument& data) {
+    Serial.printf("Processing device command: %s\n", command.c_str());
+    
+    if (command == "reset_wifi") {
+        Serial.println("MQTT Command: Reset WiFi - Restarting...");
+        ESP.restart();
+        
+    } else if (command == "restart") {
+        Serial.println("MQTT Command: Restart device");
+        ESP.restart();
+        
+    } else if (command == "status") {
+        Serial.println("MQTT Command: Publish status");
+        publishDeviceStatus();
+        
+    } else {
+        Serial.printf("Unknown command: %s\n", command.c_str());
+    }
+}
+
+void MQTTManager::publishDeviceStatus() {
+    if (!connected()) return;
+    
+    JsonDocument statusDoc;
+    statusDoc["uptime"] = millis();
+    statusDoc["free_heap"] = ESP.getFreeHeap();
+    statusDoc["wifi_connected"] = WiFi.isConnected();
+    statusDoc["wifi_rssi"] = WiFi.RSSI();
+    statusDoc["mqtt_connected"] = connected();
+    statusDoc["client_id"] = getClientId();
+    
+    String statusTopic = getDeviceTopic("status");
+    publishJson(statusTopic.c_str(), statusDoc);
+    
+    Serial.println("Device status published");
+}
+
+// ================================
+// Callback Setters
+// ================================
+
+void MQTTManager::setEnergyCallback(std::function<void(const JsonDocument&, const String&)> callback) {
+    energyCallback = callback;
+}
+
+void MQTTManager::setWeatherCallback(std::function<void(const JsonDocument&, const String&)> callback) {
+    weatherCallback = callback;
+}
+
+void MQTTManager::setHouseCallback(std::function<void(const JsonDocument&, const String&)> callback) {
+    houseCallback = callback;
 }
