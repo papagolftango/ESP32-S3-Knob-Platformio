@@ -1,5 +1,5 @@
 #include "weather_app.h"
-#include "../services/app_manager.h"
+#include "../app_manager.h"
 
 bool WeatherApp::init() {
     if (initialized) return true;
@@ -28,3 +28,4 @@ lv_obj_t* WeatherApp::createScreen() {
 void WeatherApp::onEnter() { if (screen) lv_scr_load(screen); }
 void WeatherApp::onExit() {}
 void WeatherApp::update() {}
+void WeatherApp::onMQTTMessage(const String& topic, const String& payload) {}

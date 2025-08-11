@@ -1,10 +1,10 @@
-#include "command_handler.h"
+#include "serial_command_handler.h"
 
 // Static member definitions
-bool CommandHandler::enabled = true;
-unsigned long CommandHandler::lastCommandTime = 0;
+bool SerialCommandHandler::enabled = true;
+unsigned long SerialCommandHandler::lastCommandTime = 0;
 
-void CommandHandler::begin(bool enableCommands) {
+void SerialCommandHandler::begin(bool enableCommands) {
     enabled = enableCommands;
     lastCommandTime = millis();
     
@@ -16,18 +16,18 @@ void CommandHandler::begin(bool enableCommands) {
     }
 }
 
-void CommandHandler::enable() {
+void SerialCommandHandler::enable() {
     enabled = true;
     lastCommandTime = millis();
     Serial.println("Command interface enabled");
 }
 
-void CommandHandler::disable() {
+void SerialCommandHandler::disable() {
     enabled = false;
     Serial.println("Command interface disabled for security");
 }
 
-bool CommandHandler::isEnabled() {
+bool SerialCommandHandler::isEnabled() {
     // Auto-disable after timeout for security
     if (enabled && (millis() - lastCommandTime) > COMMAND_TIMEOUT_MS) {
         disable();
@@ -35,7 +35,7 @@ bool CommandHandler::isEnabled() {
     return enabled;
 }
 
-void CommandHandler::handleSerialInput() {
+void SerialCommandHandler::handleSerialInput() {
     if (!Serial.available()) return;
     
     String command = Serial.readStringUntil('\n');
@@ -64,7 +64,7 @@ void CommandHandler::handleSerialInput() {
     executeCommand(command);
 }
 
-void CommandHandler::executeCommand(const String& command) {
+void SerialCommandHandler::executeCommand(const String& command) {
     Serial.printf("Executing command: %s\n", command.c_str());
     
     // System commands (highest priority)
@@ -123,7 +123,7 @@ void CommandHandler::executeCommand(const String& command) {
     Serial.println("Type 'help' for available commands");
 }
 
-void CommandHandler::processWiFiCommands(const String& command) {
+void SerialCommandHandler::processWiFiCommands(const String& command) {
     if (command == "reset_wifi" || command == "resetwifi" || command == "wifi_reset") {
         Serial.println("=== WiFi Reset ===");
         Serial.println("Clearing WiFi configuration...");
@@ -149,7 +149,7 @@ void CommandHandler::processWiFiCommands(const String& command) {
     }
 }
 
-void CommandHandler::processMQTTCommands(const String& command) {
+void SerialCommandHandler::processMQTTCommands(const String& command) {
     if (command == "reset_mqtt" || command == "resetmqtt" || command == "mqtt_reset") {
         Serial.println("=== MQTT Reset ===");
         Serial.println("Clearing MQTT configuration...");
@@ -174,7 +174,7 @@ void CommandHandler::processMQTTCommands(const String& command) {
     }
 }
 
-void CommandHandler::processSystemCommands(const String& command) {
+void SerialCommandHandler::processSystemCommands(const String& command) {
     if (command == "factory_reset" || command == "factoryreset" || command == "factory") {
         Serial.println("=== FACTORY RESET ===");
         Serial.println("⚠️  WARNING: This will erase ALL configuration!");
@@ -204,7 +204,7 @@ void CommandHandler::processSystemCommands(const String& command) {
     }
 }
 
-void CommandHandler::printHelp() {
+void SerialCommandHandler::printHelp() {
     Serial.println("\n=== ESP32-S3 Knob Commands ===");
     Serial.println("SYSTEM:");
     Serial.println("  help          - Show this help");
@@ -230,7 +230,7 @@ void CommandHandler::printHelp() {
     Serial.println("===============================\n");
 }
 
-void CommandHandler::printDeviceStatus() {
+void SerialCommandHandler::printDeviceStatus() {
     Serial.println("\n=== DEVICE STATUS ===");
     Serial.printf("Uptime: %lu ms (%.1f minutes)\n", millis(), millis() / 60000.0);
     Serial.printf("Free Heap: %u bytes (%.1f KB)\n", ESP.getFreeHeap(), ESP.getFreeHeap() / 1024.0);
@@ -255,7 +255,7 @@ void CommandHandler::printDeviceStatus() {
     Serial.println("==================\n");
 }
 
-void CommandHandler::printSystemInfo() {
+void SerialCommandHandler::printSystemInfo() {
     Serial.println("\n=== SYSTEM INFORMATION ===");
     Serial.printf("Chip: %s Rev %d\n", ESP.getChipModel(), ESP.getChipRevision());
     Serial.printf("CPU Cores: %d\n", ESP.getChipCores());
@@ -273,7 +273,7 @@ void CommandHandler::printSystemInfo() {
     Serial.println("=========================\n");
 }
 
-void CommandHandler::printMemoryInfo() {
+void SerialCommandHandler::printMemoryInfo() {
     Serial.println("\n=== MEMORY INFORMATION ===");
     Serial.printf("Free Heap: %u bytes (%.1f KB)\n", ESP.getFreeHeap(), ESP.getFreeHeap() / 1024.0);
     Serial.printf("Largest Free Block: %u bytes (%.1f KB)\n", ESP.getMaxAllocHeap(), ESP.getMaxAllocHeap() / 1024.0);
@@ -287,7 +287,7 @@ void CommandHandler::printMemoryInfo() {
     Serial.println("=========================\n");
 }
 
-void CommandHandler::printTaskInfo() {
+void SerialCommandHandler::printTaskInfo() {
     Serial.println("\n=== FREERTOS TASK INFO ===");
     Serial.printf("Number of Tasks: %d\n", uxTaskGetNumberOfTasks());
     Serial.printf("Scheduler State: %s\n", xTaskGetSchedulerState() == taskSCHEDULER_RUNNING ? "Running" : "Suspended");
@@ -330,7 +330,7 @@ void CommandHandler::printTaskInfo() {
     Serial.println("=========================\n");
 }
 
-void CommandHandler::setDebugMode(bool enableDebug) {
+void SerialCommandHandler::setDebugMode(bool enableDebug) {
     if (enableDebug) {
         Serial.println("Debug mode enabled - verbose logging active");
     } else {

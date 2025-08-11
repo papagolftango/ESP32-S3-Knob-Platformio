@@ -1,5 +1,5 @@
-#ifndef COMMAND_HANDLER_H
-#define COMMAND_HANDLER_H
+#ifndef SERIAL_COMMAND_HANDLER_H
+#define SERIAL_COMMAND_HANDLER_H
 
 #include <Arduino.h>
 #include "wifi_manager.h"
@@ -7,7 +7,7 @@
 #include <Preferences.h>
 
 // Command handler for serial interface - primarily for development and integration testing
-class CommandHandler {
+class SerialCommandHandler {
 private:
     static bool enabled;
     static unsigned long lastCommandTime;
@@ -43,4 +43,4 @@ public:
     static void printTaskInfo();
 };
 
-#endif // COMMAND_HANDLER_H
+#endif // SERIAL_COMMAND_HANDLER_H
