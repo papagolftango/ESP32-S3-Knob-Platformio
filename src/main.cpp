@@ -1,12 +1,10 @@
 #include <Arduino.h>
-#include <WiFi.h>
-#include <WiFiManager.h>
-#include <PubSubClient.h>
-#include <ArduinoJson.h>
 #include <Preferences.h>
-#include <ESP32Encoder.h>
 #include <lvgl.h>
 #include "lcd_config.h"
+#include "bidi_switch_knob.h"
+#include "wifi_manager.h"
+#include "mqtt_manager.h"
 
 // ================================
 // HARDWARE DEFINITIONS
@@ -19,10 +17,7 @@
 #define SCREEN_WIDTH  EXAMPLE_LCD_H_RES
 #define SCREEN_HEIGHT EXAMPLE_LCD_V_RES
 
-// Encoder pins (based on Volos's working configuration - NO BUTTON)
-#define ENCODER_A  EXAMPLE_ENCODER_ECA_PIN
-#define ENCODER_B  EXAMPLE_ENCODER_ECB_PIN
-// Note: No encoder button in Volos's configuration
+// Encoder pins: GPIO 8 (A) and GPIO 7 (B) - Volos's working configuration (no button)
 
 // ================================
 // LVGL CONFIGURATION
@@ -32,32 +27,28 @@ static lv_disp_draw_buf_t draw_buf;
 static lv_color_t buf1[SCREEN_WIDTH * 10];
 static lv_color_t buf2[SCREEN_WIDTH * 10];
 
-// ================================
-// MQTT CONFIGURATION
-// ================================
-
-struct MQTTConfig {
-    char server[64] = "mqtt.local";
-    int port = 1883;
-    char username[32] = "";
-    char password[32] = "";
-    char clientId[32] = "";
-    bool useSSL = false;
-};
-
-MQTTConfig mqttConfig;
-WiFiClient wifiClient;
-PubSubClient mqttClient(wifiClient);
+// Global preferences instance
 Preferences preferences;
 
 // ================================
 // ROTARY ENCODER
 // ================================
 
-ESP32Encoder encoder;
+// ================================
+// ENCODER STATE (Volos's proven implementation)
+// ================================
+
+// Volos-style bit manipulation macros
+#define SET_BIT(reg,bit) (reg |= ((uint32_t)0x01<<bit))
+#define CLEAR_BIT(reg,bit) (reg &= (~((uint32_t)0x01<<bit)))
+#define READ_BIT(reg,bit) (((uint32_t)reg>>bit) & 0x01)
+#define BIT_EVEN_ALL (0x00ffffff)
+
+EventGroupHandle_t knob_even_ = NULL;
+static knob_handle_t s_knob = 0;
+SemaphoreHandle_t mutex;
+
 int lastEncoderValue = 0;
-unsigned long lastButtonPress = 0;
-const unsigned long DEBOUNCE_DELAY = 200;
 
 // ================================
 // SCREEN MANAGEMENT
@@ -92,102 +83,169 @@ void my_touchpad_read(lv_indev_drv_t *indev_driver, lv_indev_data_t *data) {
     data->state = LV_INDEV_STATE_REL;
 }
 
+// Function declarations
+void setupWiFiAndMQTT();
+void onMQTTMessage(char* topic, uint8_t* payload, unsigned int length);
+void onMQTTConnect();
+void onMQTTDisconnect();
+void onWiFiConfigSaved();
+
 // ================================
-// MQTT FUNCTIONS
+// WIFI AND MQTT SETUP
 // ================================
 
-void loadMQTTConfig() {
-    preferences.begin("mqtt", false);
+void setupWiFiAndMQTT() {
+    // Setup WiFi with custom styling
+    wifiManager.setCustomHeadElement("<style>body{background:#1e1e1e;color:#fff;font-family:Arial,sans-serif;}.c{text-align:center;}div,input{padding:5px;font-size:1em;margin:5px 0;box-sizing:border-box;background:#333;border:1px solid #555;color:#fff;}input[type='submit']{background:#0066cc;cursor:pointer;}input[type='submit']:hover{background:#0052a3;}</style>");
     
-    preferences.getString("server", mqttConfig.server, sizeof(mqttConfig.server));
-    mqttConfig.port = preferences.getInt("port", 1883);
-    preferences.getString("username", mqttConfig.username, sizeof(mqttConfig.username));
-    preferences.getString("password", mqttConfig.password, sizeof(mqttConfig.password));
-    preferences.getString("clientId", mqttConfig.clientId, sizeof(mqttConfig.clientId));
-    mqttConfig.useSSL = preferences.getBool("useSSL", false);
+    // Get MQTT config for WiFi Manager parameters
+    MQTTConfig mqttConfig = mqttManager.getConfig();
     
-    // Generate client ID if empty
-    if (strlen(mqttConfig.clientId) == 0) {
-        snprintf(mqttConfig.clientId, sizeof(mqttConfig.clientId), "esp32-knob-%06X", (uint32_t)ESP.getEfuseMac());
+    // Create WiFi Manager parameters for MQTT configuration
+    WiFiManagerParameter custom_mqtt_server("mqtt_server", "MQTT Server", mqttConfig.server, 64);
+    WiFiManagerParameter custom_mqtt_port("mqtt_port", "MQTT Port", String(mqttConfig.port).c_str(), 6);
+    WiFiManagerParameter custom_mqtt_username("mqtt_username", "MQTT Username", mqttConfig.username, 32);
+    WiFiManagerParameter custom_mqtt_password("mqtt_password", "MQTT Password", mqttConfig.password, 32);
+    WiFiManagerParameter custom_mqtt_client_id("mqtt_client_id", "MQTT Client ID", mqttConfig.clientId, 32);
+    
+    // Add MQTT parameters to WiFi Manager
+    wifiManager.addParameter(&custom_mqtt_server);
+    wifiManager.addParameter(&custom_mqtt_port);
+    wifiManager.addParameter(&custom_mqtt_username);
+    wifiManager.addParameter(&custom_mqtt_password);
+    wifiManager.addParameter(&custom_mqtt_client_id);
+    
+    // Set WiFi Manager callbacks
+    wifiManager.setSaveConfigCallback(onWiFiConfigSaved);
+    wifiManager.setConfigPortalTimeout(300); // 5 minutes
+    
+    // Start WiFi connection
+    Serial.println("Starting WiFi connection...");
+    bool wifiConnected = wifiManager.autoConnect("ESP32-Knob-Setup", "smartknob123");
+    
+    if (wifiConnected) {
+        Serial.println("WiFi connected successfully!");
+        Serial.printf("IP address: %s\n", wifiManager.getIP().c_str());
+        Serial.printf("SSID: %s\n", wifiManager.getSSID().c_str());
+        
+        // Update MQTT config from WiFi Manager parameters
+        MQTTConfig updatedConfig = mqttConfig;
+        if (strlen(custom_mqtt_server.getValue()) > 0) {
+            strncpy(updatedConfig.server, custom_mqtt_server.getValue(), sizeof(updatedConfig.server));
+        }
+        if (strlen(custom_mqtt_port.getValue()) > 0) {
+            updatedConfig.port = atoi(custom_mqtt_port.getValue());
+        }
+        if (strlen(custom_mqtt_username.getValue()) > 0) {
+            strncpy(updatedConfig.username, custom_mqtt_username.getValue(), sizeof(updatedConfig.username));
+        }
+        if (strlen(custom_mqtt_password.getValue()) > 0) {
+            strncpy(updatedConfig.password, custom_mqtt_password.getValue(), sizeof(updatedConfig.password));
+        }
+        if (strlen(custom_mqtt_client_id.getValue()) > 0) {
+            strncpy(updatedConfig.clientId, custom_mqtt_client_id.getValue(), sizeof(updatedConfig.clientId));
+        }
+        
+        // Set updated MQTT config and save
+        mqttManager.setConfig(updatedConfig);
+        mqttManager.saveConfig();
+        
+        // Setup MQTT
+        mqttManager.setMessageCallback(onMQTTMessage);
+        mqttManager.setConnectCallback(onMQTTConnect);
+        mqttManager.setDisconnectCallback(onMQTTDisconnect);
+        
+        if (mqttManager.begin()) {
+            mqttManager.connect();
+        }
+        
+    } else {
+        Serial.println("WiFi connection failed - check configuration portal");
+        Serial.println("Connect to 'ESP32-Knob-Setup' network and configure WiFi");
+        Serial.println("Default password: smartknob123");
     }
-    
-    preferences.end();
-    
-    Serial.printf("MQTT Config loaded: %s:%d, Client: %s\n", 
-                  mqttConfig.server, mqttConfig.port, mqttConfig.clientId);
 }
 
-void saveMQTTConfig() {
-    preferences.begin("mqtt", false);
-    
-    preferences.putString("server", mqttConfig.server);
-    preferences.putInt("port", mqttConfig.port);
-    preferences.putString("username", mqttConfig.username);
-    preferences.putString("password", mqttConfig.password);
-    preferences.putString("clientId", mqttConfig.clientId);
-    preferences.putBool("useSSL", mqttConfig.useSSL);
-    
-    preferences.end();
-    
-    Serial.println("MQTT Config saved");
+void onWiFiConfigSaved() {
+    Serial.println("WiFi and MQTT configuration saved!");
 }
 
-void onMqttMessage(char* topic, byte* payload, unsigned int length) {
+void onMQTTConnect() {
+    Serial.println("MQTT connected - subscribing to topics");
+    
+    // Subscribe to device-specific topics
+    String deviceTopic = mqttManager.getDeviceTopic("command");
+    mqttManager.subscribe(deviceTopic.c_str());
+    
+    // Subscribe to general topics
+    mqttManager.subscribe("energy/+");
+    mqttManager.subscribe("weather/+");
+    mqttManager.subscribe("house/+");
+    
+    // Publish online status
+    String statusTopic = mqttManager.getDeviceTopic("status");
+    mqttManager.publish(statusTopic.c_str(), "online", true);
+}
+
+void onMQTTDisconnect() {
+    Serial.println("MQTT disconnected");
+}
+
+void onMQTTMessage(char* topic, uint8_t* payload, unsigned int length) {
+    // Convert payload to string
     char message[length + 1];
     memcpy(message, payload, length);
     message[length] = '\0';
     
     Serial.printf("MQTT Message [%s]: %s\n", topic, message);
     
-    // Parse and handle different topic types
-    if (strstr(topic, "/energy/")) {
-        // Handle energy data
-        JsonDocument doc;
-        deserializeJson(doc, message);
-        
-        if (doc["power"].is<float>()) {
-            float power = doc["power"];
-            Serial.printf("Power: %.2f W\n", power);
-        }
-    }
-    else if (strstr(topic, "/weather/")) {
-        // Handle weather data
-        JsonDocument doc;
-        deserializeJson(doc, message);
-        
-        if (doc["temperature"].is<float>()) {
-            float temp = doc["temperature"];
-            Serial.printf("Temperature: %.1f°C\n", temp);
-        }
-    }
-}
-
-void connectMQTT() {
-    if (!mqttClient.connected()) {
-        Serial.print("Attempting MQTT connection...");
-        
-        mqttClient.setServer(mqttConfig.server, mqttConfig.port);
-        mqttClient.setCallback(onMqttMessage);
-        
-        bool connected = false;
-        if (strlen(mqttConfig.username) > 0) {
-            connected = mqttClient.connect(mqttConfig.clientId, mqttConfig.username, mqttConfig.password);
-        } else {
-            connected = mqttClient.connect(mqttConfig.clientId);
-        }
-        
-        if (connected) {
-            Serial.println("connected");
+    // Parse JSON if applicable
+    JsonDocument doc;
+    if (mqttManager.parseJsonMessage(message, length, doc)) {
+        // Handle different topic types
+        if (strstr(topic, "/energy/")) {
+            // Handle energy data
+            float power = mqttManager.extractFloatFromJson(doc, "power", 0.0);
+            float energy = mqttManager.extractFloatFromJson(doc, "energy", 0.0);
+            Serial.printf("Energy data - Power: %.2f W, Energy: %.2f kWh\n", power, energy);
             
-            // Subscribe to topics
-            mqttClient.subscribe("home/+/energy/+");
-            mqttClient.subscribe("home/+/weather/+");
-            mqttClient.subscribe("home/+/control/+");
+        } else if (strstr(topic, "/weather/")) {
+            // Handle weather data
+            float temp = mqttManager.extractFloatFromJson(doc, "temperature", 0.0);
+            int humidity = mqttManager.extractIntFromJson(doc, "humidity", 0);
+            Serial.printf("Weather data - Temp: %.1f°C, Humidity: %d%%\n", temp, humidity);
             
-            Serial.println("Subscribed to MQTT topics");
-        } else {
-            Serial.printf("failed, rc=%d\n", mqttClient.state());
+        } else if (strstr(topic, "/house/")) {
+            // Handle house automation data
+            String room = mqttManager.extractStringFromJson(doc, "room", "unknown");
+            String device = mqttManager.extractStringFromJson(doc, "device", "unknown");
+            String state = mqttManager.extractStringFromJson(doc, "state", "unknown");
+            Serial.printf("House data - Room: %s, Device: %s, State: %s\n", 
+                         room.c_str(), device.c_str(), state.c_str());
+            
+        } else if (strstr(topic, "/command")) {
+            // Handle device commands
+            String command = mqttManager.extractStringFromJson(doc, "command", "");
+            if (command == "reset_wifi") {
+                wifiManager.reset();
+                ESP.restart();
+            } else if (command == "restart") {
+                ESP.restart();
+            } else if (command == "status") {
+                // Publish status
+                JsonDocument statusDoc;
+                statusDoc["uptime"] = millis();
+                statusDoc["free_heap"] = ESP.getFreeHeap();
+                statusDoc["wifi_rssi"] = wifiManager.getRSSI();
+                statusDoc["mqtt_connected"] = mqttManager.connected();
+                
+                String statusTopic = mqttManager.getDeviceTopic("status");
+                mqttManager.publishJson(statusTopic.c_str(), statusDoc);
+            }
         }
+    } else {
+        // Handle non-JSON messages
+        Serial.printf("Non-JSON message: %s\n", message);
     }
 }
 
@@ -208,13 +266,13 @@ void createHomeScreen() {
     
     // Status indicators
     lv_obj_t* wifi_status = lv_label_create(screens[SCREEN_HOME]);
-    lv_label_set_text(wifi_status, WiFi.status() == WL_CONNECTED ? "📶 WiFi: Connected" : "📶 WiFi: Disconnected");
-    lv_obj_set_style_text_color(wifi_status, WiFi.status() == WL_CONNECTED ? lv_color_hex(0x00FF00) : lv_color_hex(0xFF0000), 0);
+    lv_label_set_text(wifi_status, wifiManager.isWiFiConnected() ? "📶 WiFi: Connected" : "📶 WiFi: Disconnected");
+    lv_obj_set_style_text_color(wifi_status, wifiManager.isWiFiConnected() ? lv_color_hex(0x00FF00) : lv_color_hex(0xFF0000), 0);
     lv_obj_align(wifi_status, LV_ALIGN_CENTER, 0, -30);
     
     lv_obj_t* mqtt_status = lv_label_create(screens[SCREEN_HOME]);
-    lv_label_set_text(mqtt_status, mqttClient.connected() ? "📡 MQTT: Connected" : "📡 MQTT: Disconnected");
-    lv_obj_set_style_text_color(mqtt_status, mqttClient.connected() ? lv_color_hex(0x00FF00) : lv_color_hex(0xFF0000), 0);
+    lv_label_set_text(mqtt_status, mqttManager.connected() ? "📡 MQTT: Connected" : "📡 MQTT: Disconnected");
+    lv_obj_set_style_text_color(mqtt_status, mqttManager.connected() ? lv_color_hex(0x00FF00) : lv_color_hex(0xFF0000), 0);
     lv_obj_align(mqtt_status, LV_ALIGN_CENTER, 0, 0);
     
     // Navigation hint
@@ -368,25 +426,58 @@ void switchToScreen(ScreenType screen) {
 // ROTARY ENCODER HANDLING
 // ================================
 
-void handleEncoder() {
-    int currentValue = encoder.getCount();
-    
-    if (currentValue != lastEncoderValue) {
-        int delta = currentValue - lastEncoderValue;
-        lastEncoderValue = currentValue;
+// ================================
+// ROTARY ENCODER HANDLING (Volos's Multi-core Architecture)
+// ================================
+
+// Volos-style encoder callbacks
+static void _knob_left_cb(void *arg, void *data)
+{
+    uint8_t eventBits_ = 0;
+    SET_BIT(eventBits_, 0);
+    xEventGroupSetBits(knob_even_, eventBits_);
+}
+
+static void _knob_right_cb(void *arg, void *data)
+{
+    uint8_t eventBits_ = 0;
+    SET_BIT(eventBits_, 1);
+    xEventGroupSetBits(knob_even_, eventBits_);
+}
+
+// Encoder task (runs on separate core)
+static void user_encoder_loop_task(void *arg)
+{
+    for(;;)
+    {
+        EventBits_t even = xEventGroupWaitBits(knob_even_, BIT_EVEN_ALL, pdTRUE, pdFALSE, pdMS_TO_TICKS(5000));
         
-        if (delta > 0) {
-            // Clockwise rotation
-            currentScreen = (ScreenType)((currentScreen + 1) % SCREEN_COUNT);
-        } else {
-            // Counter-clockwise rotation
-            currentScreen = (ScreenType)((currentScreen - 1 + SCREEN_COUNT) % SCREEN_COUNT);
+        if(READ_BIT(even, 0))  // Left rotation
+        { 
+            if (xSemaphoreTake(mutex, portMAX_DELAY)) { 
+                // Counter-clockwise rotation
+                currentScreen = (ScreenType)((currentScreen - 1 + SCREEN_COUNT) % SCREEN_COUNT);
+                switchToScreen(currentScreen);
+                Serial.printf("Encoder CCW -> Screen: %d\n", currentScreen);
+                xSemaphoreGive(mutex); 
+            }
         }
         
-        switchToScreen(currentScreen);
-        
-        Serial.printf("Encoder: %d, Screen: %d\n", currentValue, currentScreen);
+        if(READ_BIT(even, 1))  // Right rotation
+        {
+            if (xSemaphoreTake(mutex, portMAX_DELAY)) { 
+                // Clockwise rotation
+                currentScreen = (ScreenType)((currentScreen + 1) % SCREEN_COUNT);
+                switchToScreen(currentScreen);
+                Serial.printf("Encoder CW -> Screen: %d\n", currentScreen);
+                xSemaphoreGive(mutex); 
+            }
+        }
     }
+}
+
+void handleEncoder() {
+    // No longer needed - handled by the encoder task
 }
 
 void handleButton() {
@@ -405,14 +496,31 @@ void setup() {
     // Initialize preferences
     preferences.begin("config", false);
     
-    // Setup rotary encoder (Volos configuration - no button)
-    ESP32Encoder::useInternalWeakPullResistors = UP;
-    encoder.attachHalfQuad(ENCODER_A, ENCODER_B);
-    encoder.setCount(0);
+    // Initialize Volos's encoder system (exact implementation)
+    mutex = xSemaphoreCreateMutex();
+    knob_even_ = xEventGroupCreate();
     
-    // No button in Volos's configuration
+    // Create knob with Volos's configuration
+    knob_config_t cfg = {
+        .gpio_encoder_a = EXAMPLE_ENCODER_ECA_PIN,
+        .gpio_encoder_b = EXAMPLE_ENCODER_ECB_PIN,
+    };
+    s_knob = iot_knob_create(&cfg);
     
-    Serial.println("Rotary encoder initialized (no button)");
+    if (s_knob) {
+        // Register Volos-style callbacks
+        iot_knob_register_cb(s_knob, KNOB_LEFT, _knob_left_cb, NULL);
+        iot_knob_register_cb(s_knob, KNOB_RIGHT, _knob_right_cb, NULL);
+        
+        // Start encoder task on separate core
+        xTaskCreate(user_encoder_loop_task, "user_encoder_loop_task", 3000, NULL, 2, NULL);
+        
+        Serial.println("Volos encoder system initialized successfully");
+    } else {
+        Serial.println("Failed to initialize Volos encoder system");
+    }
+    
+    Serial.println("Rotary encoder initialized (Volos multi-core, no button)");
     
     // Initialize LVGL
     lv_init();
@@ -450,26 +558,8 @@ void setup() {
     
     Serial.println("Screens created");
     
-    // Initialize WiFi
-    WiFiManager wm;
-    
-    // Auto-connect or start config portal
-    bool connected = wm.autoConnect("ESP32-Knob-Setup");
-    
-    if (connected) {
-        Serial.println("WiFi connected successfully");
-        Serial.printf("IP address: %s\n", WiFi.localIP().toString().c_str());
-    } else {
-        Serial.println("WiFi connection failed");
-    }
-    
-    // Load MQTT configuration
-    loadMQTTConfig();
-    
-    // Try to connect to MQTT
-    if (WiFi.status() == WL_CONNECTED) {
-        connectMQTT();
-    }
+    // Initialize WiFi and MQTT using new managers
+    setupWiFiAndMQTT();
     
     Serial.println("Setup complete!");
 }
@@ -486,18 +576,8 @@ void loop() {
     handleEncoder();
     handleButton();
     
-    // Handle MQTT
-    if (WiFi.status() == WL_CONNECTED) {
-        if (!mqttClient.connected()) {
-            static unsigned long lastReconnectAttempt = 0;
-            if (millis() - lastReconnectAttempt > 5000) {
-                lastReconnectAttempt = millis();
-                connectMQTT();
-            }
-        } else {
-            mqttClient.loop();
-        }
-    }
+    // Handle MQTT connection and messages
+    mqttManager.loop();
     
     // Small delay to prevent watchdog issues
     delay(5);
