@@ -3,29 +3,20 @@
 #include <lvgl.h>
 #include "lcd_config.h"
 #include "bidi_switch_knob.h"
-#in    // Initialize encoder with simple callback to AppManager
-    if (!EncoderManager::begin()) {
-        Serial.println("Failed to initialize encoder");
-        return;
-    }
-    
-    // Set up simple encoder callback - encoder just calls AppManager
-    EncoderManager::setChangeCallback([](int direction) {
-        appManager.onEncoderChange(direction);
-    });r.h"
+
 #include "mqtt_manager.h"
-#include "display_driver.h"
-#include "command_handler.h"
+#include "display_manager.h"
+
 #include "encoder_manager.h"
 #include "app_manager.h"
 
 // Include all the apps
-#include "apps/home_app.h"
-#include "apps/energy_app.h"
-#include "apps/weather_app.h"
-#include "apps/house_app.h"
-#include "apps/clock_app.h"
-#include "apps/settings_app.h"
+#include "home_app.h"
+#include "energy_app.h"
+#include "weather_app.h"
+#include "house_app.h"
+#include "clock_app.h"
+#include "settings_app.h"
 
 // ================================
 // GLOBAL INSTANCES

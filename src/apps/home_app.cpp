@@ -1,5 +1,5 @@
 #include "home_app.h"
-#include "../services/app_manager.h"
+#include "app_manager.h"
 
 HomeApp::HomeApp() {
     // Constructor - does nothing now since we register during init()

@@ -1,7 +1,7 @@
 #ifndef APP_MANAGER_H
 #define APP_MANAGER_H
 
-#include "apps/base_app.h"
+#include "base_app.h"
 
 // Node for circular linked list of apps
 struct AppNode {

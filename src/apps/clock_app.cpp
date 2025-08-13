@@ -1,5 +1,5 @@
 #include "clock_app.h"
-#include "../services/app_manager.h"
+#include "app_manager.h"
 
 bool ClockApp::init() {
     if (initialized) return true;

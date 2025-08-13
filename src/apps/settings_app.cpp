@@ -1,5 +1,5 @@
 #include "settings_app.h"
-#include "../services/app_manager.h"
+#include "app_manager.h"
 
 bool SettingsApp::init() {
     if (initialized) return true;

@@ -3,7 +3,7 @@
 
 #include <Arduino.h>
 #include <lvgl.h>
-#include "../drivers/lcd_driver.h"
+#include "lcd_driver.h"
 
 // High-level display system manager for LVGL
 class DisplayManager {
