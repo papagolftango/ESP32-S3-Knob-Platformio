@@ -7,7 +7,7 @@
 #include "mqtt_manager.h"
 #include "display_manager.h"
 
-#include "encoder_manager.h"
+#include "encoder_manager.h"/
 #include "app_manager.h"
 
 // Include all the apps
